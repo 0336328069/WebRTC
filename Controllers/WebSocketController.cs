@@ -8,12 +8,15 @@ namespace WebRTC.Controllers
     [Route("ws")]
     public class WebSocketController : ControllerBase
     {
+        private static readonly List<WebSocket> ConnectedClients = new();
+
         [HttpGet("connect")]
         public async Task Connect()
         {
             if (HttpContext.WebSockets.IsWebSocketRequest)
             {
                 WebSocket webSocket = await HttpContext.WebSockets.AcceptWebSocketAsync();
+                ConnectedClients.Add(webSocket);
                 await HandleWebSocketAsync(webSocket);
             }
             else
@@ -38,8 +41,8 @@ namespace WebRTC.Controllers
                     var message = Encoding.UTF8.GetString(buffer, 0, result.Count);
                     Console.WriteLine($"Received: {message}");
 
-                    var responseMessage = Encoding.UTF8.GetBytes($"Echo: {message}");
-                    await webSocket.SendAsync(new ArraySegment<byte>(responseMessage), WebSocketMessageType.Text, true, CancellationToken.None);
+                    // Không thêm "Echo: ", chỉ gửi lại thông điệp gốc
+                    await webSocket.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(message)), WebSocketMessageType.Text, true, CancellationToken.None);
                 }
             }
         }
