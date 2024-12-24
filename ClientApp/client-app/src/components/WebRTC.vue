@@ -1,153 +1,147 @@
 <template>
   <div>
-    <h1>Video Call with WebRTC</h1>
-    <div class="videos">
-      <video ref="localVideo" autoplay playsinline muted></video>
-      <video ref="remoteVideo" autoplay playsinline></video>
+    <h1>Video Call with SignalR</h1>
+    <div>
+      <input v-model="roomName" placeholder="Enter Room Name" />
+      <button @click="joinRoom" :disabled="isConnected">Join Room</button>
+      <button @click="leaveRoom" :disabled="!isConnected">Leave Room</button>
     </div>
-    <button @click="startCall">Start Call</button>
-    <button @click="endCall">End Call</button>
-    <div v-if="incomingCall">
-      <p>Incoming call...</p>
-      <button @click="acceptCall">Accept</button>
-      <button @click="rejectCall">Reject</button>
+    <div>
+      <h3>Local Video</h3>
+      <video ref="localVideo" autoplay playsinline muted></video>
+    </div>
+    <div>
+      <h3>Remote Video</h3>
+      <video ref="remoteVideo" autoplay playsinline></video>
     </div>
   </div>
 </template>
 
-<script setup lang="ts">
-import { connectWebSocket, closeWebSocket, sendMessage } from "@/api/WebRTC";
-import { ref, onMounted, onBeforeUnmount } from "vue";
+<script setup>
+import { ref, onMounted, onBeforeUnmount } from 'vue';
+import {
+  createSignalRConnection,
+  onSignalREvent,
+  joinRoom as signalRJoinRoom,
+  leaveRoom as signalRLeaveRoom,
+  sendSignal as signalRSendSignal,
+  stopSignalRConnection,
+} from '@/utils/connection';
 
-const localVideo = ref<HTMLVideoElement | null>(null);
-const remoteVideo = ref<HTMLVideoElement | null>(null);
+const roomName = ref('');
+const isConnected = ref(false);
+const localVideo = ref(null);
+const remoteVideo = ref(null);
 
-let localStream: MediaStream | null = null;
-let peerConnection: RTCPeerConnection | null = null;
+let peerConnection = null;
+let localStream = null;
+const iceConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
 
-const incomingCall = ref(false); // Trạng thái cuộc gọi đến
-let offerData: RTCSessionDescriptionInit | null = null; // Dữ liệu offer từ người gọi
-
-// ICE server configuration
-const iceConfig = {
-  iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-};
-
-// Hàm xử lý tín hiệu WebSocket
-const handleSignalingMessage = async (message: string) => {
-  const data = JSON.parse(message);
-
-  if (data.type === "offer") {
-    // Khi nhận được offer, hiển thị thông báo cuộc gọi đến
-    incomingCall.value = true;
-    offerData = data;
-  }
-
-  if (data.type === "answer" && peerConnection) {
-    await peerConnection.setRemoteDescription(new RTCSessionDescription(data));
-  }
-
-  if (data.type === "candidate" && peerConnection) {
-    await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
-  }
-};
-
-// Hàm bắt đầu cuộc gọi
-const startCall = async () => {
-  localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-  if (localVideo.value) {
-    localVideo.value.srcObject = localStream;
-  }
-
+// Thiết lập WebRTC kết nối
+const setupPeerConnection = async () => {
   peerConnection = new RTCPeerConnection(iceConfig);
-
-  localStream.getTracks().forEach((track) => peerConnection?.addTrack(track, localStream!));
-
-  peerConnection.ontrack = (event) => {
-    if (remoteVideo.value) {
-      remoteVideo.value.srcObject = event.streams[0];
-    }
-  };
 
   peerConnection.onicecandidate = (event) => {
     if (event.candidate) {
-      sendMessage(JSON.stringify({ type: "candidate", candidate: event.candidate }));
+      signalRSendSignal(roomName.value, connection.connectionId, JSON.stringify({ candidate: event.candidate }));
     }
   };
 
+  peerConnection.ontrack = (event) => {
+    if (!remoteVideo.value.srcObject) {
+      remoteVideo.value.srcObject = new MediaStream();
+    }
+    remoteVideo.value.srcObject.addTrack(event.track);
+  };
+
+  localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+  localVideo.value.srcObject = localStream;
+  localStream.getTracks().forEach((track) => peerConnection.addTrack(track, localStream));
+};
+
+// Tạo offer WebRTC
+const createOffer = async (userId) => {
   const offer = await peerConnection.createOffer();
   await peerConnection.setLocalDescription(offer);
-  sendMessage(JSON.stringify(offer));
+
+  signalRSendSignal(roomName.value, userId, JSON.stringify({ type: 'offer', sdp: offer.sdp }));
 };
 
-// Hàm kết thúc cuộc gọi
-const endCall = () => {
-  peerConnection?.close();
-  peerConnection = null;
-  if (localStream) {
-    localStream.getTracks().forEach((track) => track.stop());
-    localStream = null;
-  }
-  if (localVideo.value) localVideo.value.srcObject = null;
-  if (remoteVideo.value) remoteVideo.value.srcObject = null;
-};
-
-// Hàm chấp nhận cuộc gọi
-const acceptCall = async () => {
-  incomingCall.value = false; // Ẩn thông báo
-
-  localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-  if (localVideo.value) {
-    localVideo.value.srcObject = localStream;
-  }
-
-  peerConnection = new RTCPeerConnection(iceConfig);
-
-  localStream.getTracks().forEach((track) => peerConnection?.addTrack(track, localStream!));
-
-  peerConnection.ontrack = (event) => {
-    if (remoteVideo.value) {
-      remoteVideo.value.srcObject = event.streams[0];
-    }
-  };
-
-  peerConnection.onicecandidate = (event) => {
-    if (event.candidate) {
-      sendMessage(JSON.stringify({ type: "candidate", candidate: event.candidate }));
-    }
-  };
-
-  await peerConnection.setRemoteDescription(new RTCSessionDescription(offerData!));
+// Xử lý offer từ người khác
+const handleOffer = async (userId, offer) => {
+  await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
   const answer = await peerConnection.createAnswer();
   await peerConnection.setLocalDescription(answer);
-  sendMessage(JSON.stringify(peerConnection.localDescription));
+
+  signalRSendSignal(roomName.value, userId, JSON.stringify({ type: 'answer', sdp: answer.sdp }));
 };
 
-// Hàm từ chối cuộc gọi
-const rejectCall = () => {
-  incomingCall.value = false;
+// Xử lý sự kiện SignalR
+const handleSignalREvents = () => {
+  onSignalREvent('UserJoined', async (userId) => {
+    console.log(`${userId} joined`);
+    if (userId !== connection.connectionId) {
+      await createOffer(userId);
+    }
+  });
+
+  onSignalREvent('ReceiveSignal', async (userId, signal) => {
+    const data = JSON.parse(signal);
+
+    if (data.type === 'offer') {
+      await handleOffer(userId, data);
+    } else if (data.type === 'answer') {
+      await peerConnection.setRemoteDescription(new RTCSessionDescription(data));
+    } else if (data.candidate) {
+      await peerConnection.addIceCandidate(new RTCIceCandidate(data));
+    }
+  });
+
+  onSignalREvent('UserLeft', (userId) => {
+    console.log(`${userId} left`);
+  });
 };
 
-// Khởi tạo WebSocket
-onMounted(() => {
-  connectWebSocket(handleSignalingMessage, console.error, () => console.log("WebSocket closed"));
+// Tham gia phòng
+const joinRoom = async () => {
+  await createSignalRConnection('https://localhost:7229/videocall');
+  await setupPeerConnection();
+  handleSignalREvents();
+
+  await signalRJoinRoom(roomName.value);
+  isConnected.value = true;
+};
+
+// Rời phòng
+const leaveRoom = async () => {
+  await signalRLeaveRoom(roomName.value);
+  isConnected.value = false;
+
+  if (peerConnection) {
+    peerConnection.close();
+    peerConnection = null;
+  }
+};
+
+// Lifecycle hooks
+onMounted(async () => {
+  console.log('Component mounted.');
 });
 
 onBeforeUnmount(() => {
-  closeWebSocket();
+  stopSignalRConnection();
+  if (peerConnection) {
+    peerConnection.close();
+  }
 });
 </script>
 
 <style scoped>
-.videos {
-  display: flex;
-  gap: 10px;
-}
-
 video {
   width: 300px;
   height: 200px;
-  border: 1px solid #ccc;
+  background: #ddd;
+  margin: 10px;
 }
 
 button {
@@ -159,7 +153,8 @@ button {
   cursor: pointer;
 }
 
-button:hover {
-  background-color: #45a049;
+button:disabled {
+  background-color: #9e9e9e;
+  cursor: not-allowed;
 }
 </style>

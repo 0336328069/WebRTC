@@ -6,15 +6,23 @@ builder.Services.AddControllers();
 // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("AllowVueApp", builder =>
+    {
+        builder.WithOrigins("http://localhost:5173") // Địa chỉ FE
+               .AllowAnyMethod()
+               .AllowAnyHeader()
+               .AllowCredentials();
+    });
+});
+builder.Services.AddSignalR();
+
 
 var app = builder.Build();
-
-var webSocketOptions = new WebSocketOptions
-{
-    KeepAliveInterval = TimeSpan.FromSeconds(120) // Set thời gian giữ kết nối
-};
-app.UseWebSockets(webSocketOptions);
-
+app.UseRouting();
+app.UseCors("AllowVueApp");
+// Map SignalR Hub
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
 {
@@ -27,5 +35,6 @@ app.UseHttpsRedirection();
 app.UseAuthorization();
 
 app.MapControllers();
+app.MapHub<VideoCallHub>("/videocall");
 
 app.Run();
