@@ -1,140 +1,218 @@
+<script setup lang="ts">
+import { ref, onMounted } from "vue";
+import { createSignalRConnection, sendSignal, onSignalREvent, endCallConnection } from "@/utils/connection";
+
+// Biến chính
+const localStream = ref<MediaStream | null>(null);
+const remoteStream = ref<MediaStream | null>(new MediaStream());
+const peerConnection = ref<RTCPeerConnection | null>(null);
+const localVideo = ref<HTMLVideoElement | null>(null);
+const remoteVideo = ref<HTMLVideoElement | null>(null);
+const remoteUserId = ref("");
+const localUserId = ref("");
+const inCall = ref(false);
+const isReady = ref(false);
+const isCallEnded = ref(false);
+const iceConfig = {
+  iceServers: [
+    {
+      urls: "turn:relay1.expressturn.com:3478",
+      username: "ef0XOO2TKNCM6Y4RBZ",
+      credential: "toLMiaha1hYZFJiB",
+    },
+  ],
+};
+
+// Thiết lập luồng video local
+const setupLocalStream = async () => {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    localStream.value = stream;
+    if (localVideo.value) {
+      localVideo.value.srcObject = stream;
+    }
+  } catch (error) {
+    console.error("Không thể truy cập camera/microphone:", error);
+  }
+};
+
+const endCall = async () => {
+  if (isCallEnded.value) return; // Nếu đã kết thúc thì không làm gì nữa
+
+  isCallEnded.value = true; // Đánh dấu đã kết thúc
+
+  // Gửi tín hiệu EndCall tới server
+  try {
+    if (localUserId.value) {
+      await endCallConnection(localUserId.value);
+    }
+  } catch (error) {
+    console.error("Không thể gửi tín hiệu kết thúc:", error);
+  }
+
+  // Dọn dẹp local stream và UI
+  cleanupCall();
+};
+
+const cleanupCall = () => {
+  if (peerConnection.value) {
+    peerConnection.value.close();
+    peerConnection.value = null;
+  }
+  if (remoteStream.value) {
+    remoteStream.value.getTracks().forEach((track) => track.stop());
+    remoteStream.value = null;
+    if (remoteVideo.value) {
+      remoteVideo.value.srcObject = null;
+    }
+  }
+
+  inCall.value = false;
+};
+// Tạo kết nối WebRTC PeerConnection
+const createPeerConnection = () => {
+  const pc = new RTCPeerConnection(iceConfig);
+
+  pc.onicecandidate = (event) => {
+    if (event.candidate) {
+      sendSignal(remoteUserId.value, JSON.stringify({ candidate: event.candidate }));
+    }
+  };
+
+  pc.ontrack = (event) => {
+    if (remoteStream.value) {
+      remoteStream.value.addTrack(event.track);
+      if (remoteVideo.value) {
+        remoteVideo.value.srcObject = remoteStream.value;
+      }
+    }
+  };
+
+  if (localStream.value) {
+    localStream.value.getTracks().forEach((track) => pc.addTrack(track, localStream.value!));
+  }
+
+  return pc;
+};
+
+// Gọi người dùng khác
+const callUser = async () => {
+  if (!remoteUserId.value) {
+    alert("Vui lòng nhập User ID để gọi.");
+    return;
+  }
+
+  // Thiết lập local stream nếu chưa được thiết lập
+  if (!localStream.value) {
+    await setupLocalStream();
+  }
+
+  peerConnection.value = createPeerConnection();
+  const offer = await peerConnection.value.createOffer();
+  await peerConnection.value.setLocalDescription(offer);
+
+  sendSignal(remoteUserId.value, JSON.stringify({ type: "offer", sdp: offer.sdp }));
+  inCall.value = true;
+};
+
+// Xử lý khi nhận được offer
+const handleOffer = async (sdp: string, fromUserId: string) => {
+  const isAccepted = window.confirm(`Người dùng ${fromUserId} muốn gọi cho bạn. Chấp nhận cuộc gọi?`);
+
+  if (isAccepted) {
+    peerConnection.value = createPeerConnection();
+    await peerConnection.value.setRemoteDescription(new RTCSessionDescription({ type: "offer", sdp }));
+    const answer = await peerConnection.value.createAnswer();
+    await peerConnection.value.setLocalDescription(answer);
+
+    sendSignal(fromUserId, JSON.stringify({ type: "answer", sdp: answer.sdp }));
+    inCall.value = true;
+  } else {
+    console.log(`Người dùng ${fromUserId} đã từ chối cuộc gọi.`);
+    sendSignal(fromUserId, JSON.stringify({ type: "reject" }));
+  }
+};
+
+// Xử lý khi nhận được answer
+const handleAnswer = async (sdp: string) => {
+  if (peerConnection.value) {
+    await peerConnection.value.setRemoteDescription(new RTCSessionDescription({ type: "answer", sdp }));
+  }
+};
+
+// Xử lý khi nhận được ICE Candidate
+const handleCandidate = async (candidate: RTCIceCandidateInit) => {
+  if (peerConnection.value) {
+    await peerConnection.value.addIceCandidate(new RTCIceCandidate(candidate));
+  }
+};
+// Thiết lập kết nối SignalR
+const setupSignalR = async () => {
+  try {
+    const connection = await createSignalRConnection("https://localhost:7229/videocall");
+    localUserId.value = connection.connectionId;
+    console.log(`SignalR connected with ID: ${localUserId.value}`); // Log ID của người dùng local
+
+    // Đăng ký sự kiện ReceiveSignal
+    onSignalREvent("ReceiveSignal", (fromUserId, data) => {
+      const message = JSON.parse(data);
+      console.log(message.type);
+      if (message.type === "offer") {
+        handleOffer(message.sdp, fromUserId);
+      } else if (message.type === "answer") {
+        handleAnswer(message.sdp);
+      } else if (message.type === "reject") {
+        alert(`Người dùng ${fromUserId} đã từ chối cuộc gọi.`);
+        inCall.value = false;
+      } else if (message.candidate) {
+        handleCandidate(message.candidate);
+      }
+    });
+
+    onSignalREvent("ReceiveCallEnded", (callerId) => {
+      if (callerId === localUserId.value) {
+        console.log("Tín hiệu CallEnded từ chính user hiện tại, bỏ qua.");
+        return;
+      }
+
+      if (!isCallEnded.value) {
+        isCallEnded.value = true;
+        cleanupCall();
+      }
+    });
+
+    isReady.value = true;
+  } catch (error) {
+    console.error("SignalR connection error:", error);
+  }
+};
+
+// Khi component được mount
+onMounted(() => {
+  setupLocalStream();
+  setupSignalR();
+});
+</script>
+
 <template>
   <div>
-    <h1>Video Call with SignalR</h1>
+    <h1>Video Call</h1>
+    <h2>User ID của bạn: {{ localUserId }}</h2>
     <div>
-      <input v-model="roomName" placeholder="Enter Room Name" />
-      <button @click="joinRoom" :disabled="isConnected">Join Room</button>
-      <button @click="leaveRoom" :disabled="!isConnected">Leave Room</button>
+      <input v-model="remoteUserId" placeholder="Nhập User ID để gọi" />
+      <button @click="callUser" :disabled="!isReady || inCall">Gọi</button>
+      <button @click="endCall" :disabled="!inCall">Kết thúc</button>
     </div>
     <div>
-      <h3>Local Video</h3>
+      <h3>Video của bạn</h3>
       <video ref="localVideo" autoplay playsinline muted></video>
     </div>
     <div>
-      <h3>Remote Video</h3>
+      <h3>Video từ người khác</h3>
       <video ref="remoteVideo" autoplay playsinline></video>
     </div>
   </div>
 </template>
-
-<script setup>
-import { ref, onMounted, onBeforeUnmount } from 'vue';
-import {
-  createSignalRConnection,
-  onSignalREvent,
-  joinRoom as signalRJoinRoom,
-  leaveRoom as signalRLeaveRoom,
-  sendSignal as signalRSendSignal,
-  stopSignalRConnection,
-} from '@/utils/connection';
-
-const roomName = ref('');
-const isConnected = ref(false);
-const localVideo = ref(null);
-const remoteVideo = ref(null);
-
-let peerConnection = null;
-let localStream = null;
-const iceConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
-
-// Thiết lập WebRTC kết nối
-const setupPeerConnection = async () => {
-  peerConnection = new RTCPeerConnection(iceConfig);
-
-  peerConnection.onicecandidate = (event) => {
-    if (event.candidate) {
-      signalRSendSignal(roomName.value, connection.connectionId, JSON.stringify({ candidate: event.candidate }));
-    }
-  };
-
-  peerConnection.ontrack = (event) => {
-    if (!remoteVideo.value.srcObject) {
-      remoteVideo.value.srcObject = new MediaStream();
-    }
-    remoteVideo.value.srcObject.addTrack(event.track);
-  };
-
-  localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-  localVideo.value.srcObject = localStream;
-  localStream.getTracks().forEach((track) => peerConnection.addTrack(track, localStream));
-};
-
-// Tạo offer WebRTC
-const createOffer = async (userId) => {
-  const offer = await peerConnection.createOffer();
-  await peerConnection.setLocalDescription(offer);
-
-  signalRSendSignal(roomName.value, userId, JSON.stringify({ type: 'offer', sdp: offer.sdp }));
-};
-
-// Xử lý offer từ người khác
-const handleOffer = async (userId, offer) => {
-  await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
-  const answer = await peerConnection.createAnswer();
-  await peerConnection.setLocalDescription(answer);
-
-  signalRSendSignal(roomName.value, userId, JSON.stringify({ type: 'answer', sdp: answer.sdp }));
-};
-
-// Xử lý sự kiện SignalR
-const handleSignalREvents = () => {
-  onSignalREvent('UserJoined', async (userId) => {
-    console.log(`${userId} joined`);
-    if (userId !== connection.connectionId) {
-      await createOffer(userId);
-    }
-  });
-
-  onSignalREvent('ReceiveSignal', async (userId, signal) => {
-    const data = JSON.parse(signal);
-
-    if (data.type === 'offer') {
-      await handleOffer(userId, data);
-    } else if (data.type === 'answer') {
-      await peerConnection.setRemoteDescription(new RTCSessionDescription(data));
-    } else if (data.candidate) {
-      await peerConnection.addIceCandidate(new RTCIceCandidate(data));
-    }
-  });
-
-  onSignalREvent('UserLeft', (userId) => {
-    console.log(`${userId} left`);
-  });
-};
-
-// Tham gia phòng
-const joinRoom = async () => {
-  await createSignalRConnection('https://localhost:7229/videocall');
-  await setupPeerConnection();
-  handleSignalREvents();
-
-  await signalRJoinRoom(roomName.value);
-  isConnected.value = true;
-};
-
-// Rời phòng
-const leaveRoom = async () => {
-  await signalRLeaveRoom(roomName.value);
-  isConnected.value = false;
-
-  if (peerConnection) {
-    peerConnection.close();
-    peerConnection = null;
-  }
-};
-
-// Lifecycle hooks
-onMounted(async () => {
-  console.log('Component mounted.');
-});
-
-onBeforeUnmount(() => {
-  stopSignalRConnection();
-  if (peerConnection) {
-    peerConnection.close();
-  }
-});
-</script>
 
 <style scoped>
 video {

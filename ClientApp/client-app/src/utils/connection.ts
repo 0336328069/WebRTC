@@ -23,39 +23,29 @@ export async function createSignalRConnection(hubUrl: string) {
   return connection
 }
 
-// Đăng ký sự kiện từ server (dùng chung)
+// Đăng ký user local với server
+export async function registerUser(userId: string) {
+  if (!connection) {
+    throw new Error('SignalR connection has not been initialized.')
+  }
+  await connection.invoke('RegisterUser', userId)
+  console.log(`User registered: ${userId}`)
+}
+
+// Gửi tín hiệu WebRTC
+export async function sendSignal(targetUserId: string, signal: string) {
+  if (!connection) {
+    throw new Error('SignalR connection has not been initialized.')
+  }
+  await connection.invoke('SendSignal', targetUserId, signal)
+}
+
+// Nhận tín hiệu từ server
 export function onSignalREvent(eventName: string, callback: (...args: any[]) => void) {
   if (!connection) {
     throw new Error('SignalR connection has not been initialized.')
   }
   connection.on(eventName, callback)
-}
-
-// Tham gia phòng
-export async function joinRoom(roomName: string) {
-  if (!connection) {
-    throw new Error('SignalR connection has not been initialized.')
-  }
-  await connection.invoke('JoinRoom', roomName)
-  console.log(`Joined room: ${roomName}`)
-}
-
-// Rời phòng
-export async function leaveRoom(roomName: string) {
-  if (!connection) {
-    throw new Error('SignalR connection has not been initialized.')
-  }
-  await connection.invoke('LeaveRoom', roomName)
-  console.log(`Left room: ${roomName}`)
-}
-
-// Gửi tín hiệu WebRTC
-export async function sendSignal(roomName: string, userId: string, signal: string) {
-  if (!connection) {
-    throw new Error('SignalR connection has not been initialized.')
-  }
-  await connection.invoke('SendSignal', roomName, userId, signal)
-  console.log(`Signal sent to room ${roomName} for user ${userId}`)
 }
 
 // Hủy kết nối SignalR
@@ -64,5 +54,11 @@ export async function stopSignalRConnection() {
     await connection.stop()
     console.log('SignalR connection stopped.')
     connection = null
+  }
+}
+
+export const endCallConnection = async (localUserId: string) => {
+  if (connection) {
+    await connection.invoke('EndCall', localUserId)
   }
 }
